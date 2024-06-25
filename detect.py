@@ -1,4 +1,4 @@
-import cv2
+import cv2 
 import numpy as np
 import mtcnn
 from core.model import MobileFacenet
@@ -14,10 +14,6 @@ required_size = (112, 112)  # MobileFacenet의 입력 크기에 맞춰 변경
 def normalize(img):
     return (img - 127.5) / 128.0
 
-def l2_normalizer(x, axis=-1, epsilon=1e-10):
-    output = x / np.sqrt(np.maximum(np.sum(np.square(x), axis=axis, keepdims=True), epsilon))
-    return output
-
 def get_face(img, box):
     x1, y1, width, height = box
     x1, y1 = abs(x1), abs(y1)
@@ -31,8 +27,7 @@ def get_encode(face_encoder, face, size):
     face_tensor = torch.tensor(face, dtype=torch.float32).unsqueeze(0).permute(0, 3, 1, 2)
     with torch.no_grad():
         encode = face_encoder(face_tensor).numpy()
-    encode = l2_normalizer(encode)
-    return encode
+    return encode.flatten() 
 
 def load_matfile(matfile_path):
     encoding_dict = {}
@@ -54,8 +49,6 @@ def detect(img, detector, encoder, encoding_dict):
 
         distance = float("inf")
         for db_name, db_encode in encoding_dict.items():
-            db_encode = db_encode.flatten()  # 1차원 벡터로 변환
-            encode = encode.flatten()  # 1차원 벡터로 변환
             dist = cosine(db_encode, encode)
             if dist < recognition_t and dist < distance:
                 name = db_name
@@ -98,10 +91,10 @@ if __name__ == "__main__":
             print("CAM NOT OPENED")
             break
         
+        frame = detect(frame, face_detector, face_encoder, encoding_dict)
+        
         # Write the frame to the file
         out.write(frame)
-
-        frame = detect(frame, face_detector, face_encoder, encoding_dict)
 
         # FPS 계산
         frame_count += 1
@@ -119,3 +112,4 @@ if __name__ == "__main__":
     cap.release()
     out.release()
     cv2.destroyAllWindows()
+
