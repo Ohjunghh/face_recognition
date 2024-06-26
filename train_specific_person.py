@@ -2,7 +2,6 @@ import os
 import numpy as np
 import cv2
 import torch
-import torch.utils.data
 import scipy.io
 from core import model
 import argparse
@@ -14,7 +13,7 @@ def trainSpecificPerson(face_data_dir, required_shape=(112, 112), model_path='./
 
     # Load pre-trained model
     if os.path.isfile(model_path):
-        checkpoint = torch.load(model_path, map_location=torch.device('cpu'))  # GPU 없이 CPU에서 로드
+        checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
         net.load_state_dict(checkpoint['net_state_dict'])
     else:
         raise FileNotFoundError(f"Cannot find model checkpoint at {model_path}")
@@ -22,10 +21,9 @@ def trainSpecificPerson(face_data_dir, required_shape=(112, 112), model_path='./
     net.eval()
 
     # Face detector
-    face_detector =  MTCNN()# Implement or use your face detection method here
+    face_detector = MTCNN()
 
     # Prepare for feature extraction
-    encodes = []
     encoding_dict = {}
 
     # Iterate through each person's directory
@@ -41,7 +39,7 @@ def trainSpecificPerson(face_data_dir, required_shape=(112, 112), model_path='./
             img_BGR = cv2.imread(image_path)
             img_RGB = cv2.cvtColor(img_BGR, cv2.COLOR_BGR2RGB)
 
-            # Detect face using face_detector (modify according to your setup)
+            # Detect face using face_detector
             x = face_detector.detect_faces(img_RGB)
             if x:  # Face detected
                 x1, y1, width, height = x[0]['box']
@@ -55,7 +53,7 @@ def trainSpecificPerson(face_data_dir, required_shape=(112, 112), model_path='./
 
                 # Convert to tensor and move to CPU
                 face_tensor = torch.tensor(face, dtype=torch.float32).unsqueeze(0).permute(0, 3, 1, 2)
-                
+
                 # Extract feature using MobileFaceNet
                 with torch.no_grad():
                     encode = net(face_tensor).numpy()
@@ -67,8 +65,21 @@ def trainSpecificPerson(face_data_dir, required_shape=(112, 112), model_path='./
             encode = np.mean(encodes, axis=0)
             encoding_dict[person_name] = encode
 
-    # Save encodings to a .mat file
-    scipy.io.savemat(save_path, encoding_dict)
+    # Load existing data or create an empty dictionary
+    if os.path.exists(save_path):
+        existing_data = scipy.io.loadmat(save_path)
+    else:
+        existing_data = {}
+
+    # Update existing data with new encodings
+    for person_name, new_encode in encoding_dict.items():
+        if person_name not in existing_data:
+            existing_data[person_name] = new_encode  # Directly assign new_encode
+        else:
+            existing_data[person_name] = new_encode  # Overwrite existing data with new_encode
+
+    # Save updated data to MAT file
+    scipy.io.savemat(save_path, existing_data)
 
 
 if __name__ == '__main__':
