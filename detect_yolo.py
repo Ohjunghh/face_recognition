@@ -1,19 +1,16 @@
-import cv2 
+import cv2
 import numpy as np
 from core.model import MobileFacenet
 from scipy.spatial.distance import cosine
 import torch
 import scipy.io
 import pickle
-import pathlib
 
-temp = pathlib.PosixPath
-pathlib.PosixPath = pathlib.WindowsPath
 
-# 임계값 및 설정값 정의
-confidence_t = 0.99  # 얼굴 검출 확률 임계값. Yolo v5가 얼굴로 확신하는 경우만 검출하도록 한다.
-recognition_t = 0.5   # 인식 임계값. 인식된 인물과의 코사인 유사도가 이 임계값 이상일 경우만 인식하도록 한다.
-required_size = (160, 160)
+# Thresholds and settings
+confidence_t = 0.80  # Object detection confidence threshold
+recognition_t = 0.5  # Face recognition threshold
+required_size = (160, 160)  # Required face image size
 
 def load_matfile(matfile_path):
     encoding_dict = {}
@@ -23,14 +20,30 @@ def load_matfile(matfile_path):
             encoding_dict[key] = mat_data[key][0]
     return encoding_dict
 
+
 def normalize(img):
     return (img - 127.5) / 128.0
 
 def get_encode(face_encoder, face, size):
     face = normalize(face)
     face = cv2.resize(face, size)
-    encode = face_encoder.predict(np.expand_dims(face, axis=0))[0]
+    
+    # Convert face to tensor and move to device
+    face_tensor = torch.from_numpy(face.transpose((2, 0, 1))).float().to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    face_tensor = face_tensor.unsqueeze(0)  # Add batch dimension
+    
+    # Move face_encoder to the same device as face_tensor
+    face_encoder = face_encoder.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    
+    # Forward pass through face_encoder
+    with torch.no_grad():
+        encode = face_encoder(face_tensor)
+    
+    # Move encode to CPU and convert to numpy array
+    encode = encode.cpu().numpy()[0]  # Convert tensor to numpy array and remove batch dimension
+    
     return encode
+
 
 def load_pickle(path):
     with open(path, 'rb') as f:
@@ -48,28 +61,49 @@ def apply_mosaic(image, pt_1, pt_2, kernel_size=15):
     return image
 
 def run_yolo(frame, model, face_encoder, encoding_dict):
-    results = model(frame)
+    results = model(frame)  # Perform object detection
     for det in results.xyxy[0]:
         x1, y1, x2, y2, conf, cls = det
         label = f'{model.names[int(cls)]} {conf:.2f}'
         
         if conf >= confidence_t:
+            # Extract object region
+            object_img = frame[int(y1):int(y2), int(x1):int(x2)]
+            
+            # Check if the detected object is a face
             if model.names[int(cls)] == 'face':
-                # 얼굴 부분 추출
-                face_img = frame[int(y1):int(y2), int(x1):int(x2)]
-                # 추출한 얼굴을 FaceNet 모델에 입력하여 인코딩
-                encode = get_encode(face_encoder, face_img, required_size)
+                # Encode face using FaceNet model
+                #face_img = cv2.resize(object_img, required_size)
+                encode_face = get_encode(face_encoder, object_img, required_size)  # Rename to avoid overwrite
                 
-                # 얼굴 인식
+
+                # Face recognition
                 name = 'unknown'
                 distance = float("inf")
                 for db_name, db_encode in encoding_dict.items():
-                    dist = cosine(db_encode, encode)
+                    # Ensure both encode_face and db_encode are numpy arrays with the same shape
+                    encode = np.array(encode_face)
+                    db_encode = np.array(db_encode)
+                    
+                    # Normalize vectors
+                    encode = encode / np.linalg.norm(encode)
+                    db_encode = db_encode / np.linalg.norm(db_encode)
+                    
+                    # Check dimensions of encode and db_encode
+                    if encode.shape != db_encode.shape:
+                        print("encode.shape != db_encode.shape")
+                        print("encode.shape:"+encode.shape)
+                        print("db_encode.shape:"+db_encode.shape)
+                        continue  # Skip if dimensions don't match
+
+                    # Calculate cosine distance
+                    dist = cosine(encode, db_encode)
+                    #print("dist:",dist)
                     if dist < recognition_t and dist < distance:
                         name = db_name
                         distance = dist
                 
-                # 결과 표시 및 모자이크 적용
+                # Display results
                 if name == 'unknown':
                     frame = apply_mosaic(frame, (int(x1), int(y1)), (int(x2), int(y2)))
                     cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
@@ -77,8 +111,9 @@ def run_yolo(frame, model, face_encoder, encoding_dict):
                 else:
                     cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
                     cv2.putText(frame, f'{name} {distance:.2f}', (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
             else:
-                # 다른 클래스의 객체는 그대로 표시하되, 모자이크 적용
+                # Apply mosaic to non-face objects and display labels
                 frame = apply_mosaic(frame, (int(x1), int(y1)), (int(x2), int(y2)))
                 cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
                 cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
@@ -86,39 +121,69 @@ def run_yolo(frame, model, face_encoder, encoding_dict):
     return frame
 
 if __name__ == "__main__":
-    # Load YOLO model
-    model = torch.hub.load('ultralytics/yolov5', 'custom', path='./627.pt', force_reload=True)
+    # temp = pathlib.PosixPath
+    # pathlib.PosixPath = pathlib.WindowsPath
     
-    # Load FaceNet model
+    # Load YOLOv5 model
+    model = torch.hub.load('ultralytics/yolov5', 'custom', path='./627.pt', force_reload=True)
+    print("YOLOv5 model loaded successfully.")
+    
+    # YOLOv5 설정
+    model.conf = 0.5  # Detection confidence threshold
+    model.classes = None  # 모든 클래스 사용
+    model.agnostic_nms = False  # 클래스 독립적인 NMS 설정
+    
+    # Define the path to the model checkpoint
+    model_path = 'C:/GRADU/face_recognition/model/best/068.ckpt'
+    
+    # Load MobileFaceNet model
     face_encoder = MobileFacenet()
-    model_path = './model/best/068.ckpt'  # 학습된 모델 경로
-    checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
+    face_encoder.eval()  # Set model to evaluation mode
+    
+    # Load the model checkpoint
+    checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    
+    # Load state_dict into MobileFacenet model
     face_encoder.load_state_dict(checkpoint['net_state_dict'])
-    face_encoder.eval()
+    
+    # Define the required size for face embedding
+    required_size = (112, 112)
+    
 
-    # Load encoding dictionary
-    encodings_path = './result/specific_person_features.mat'  # 저장된 인코딩 경로
+    # 얼굴 인코딩 데이터 로드
+    encodings_path = './result/specific_person_features.mat'
     encoding_dict = load_matfile(encodings_path)
 
-    # Initialize webcam
+    # 웹캠 열기
     cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Could not open webcam.")
+        exit()
+
+    # 비디오 출력 설정
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     out = cv2.VideoWriter('output_combined1.avi', fourcc, 20.0, (640, 480))
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
-            print("CAM NOT OPENED")
+            print("Error: Failed to capture image.")
             break
 
-        # YOLO detection 및 얼굴 인식
+        # YOLOv5을 사용한 객체 검출 및 얼굴 인식 실행
         frame = run_yolo(frame, model, face_encoder, encoding_dict)
-        
+
+        # 비디오 파일에 프레임 추가
         out.write(frame)
-        cv2.imshow('camera', frame)
+
+        # 프레임을 창에 표시
+        cv2.imshow('Camera', frame)
+
+        # 'q' 키를 눌러 종료
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+    # 자원 해제
     cap.release()
     out.release()
     cv2.destroyAllWindows()
